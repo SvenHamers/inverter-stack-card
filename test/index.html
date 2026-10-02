@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inverter Stack Card — Test Harness</title>
+  <style>
+    html, body { margin: 0; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #121212; color: #e1e1e1;
+      --primary-text-color: #e1e1e1; --secondary-text-color: #9b9b9b; --primary-color: #03a9f4; --divider-color: rgba(255,255,255,0.12); }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 12px 16px; background: #1a1a1a; border-bottom: 1px solid #2a2a2a; font-size: 12px; color: #aaa; }
+    .controls label { display: flex; align-items: center; gap: 7px; }
+    .controls select { background: #222; color: #eee; border: 1px solid #383838; border-radius: 4px; padding: 4px 6px; font: inherit; }
+    .stage { padding: 24px 16px; }
+    .frame { margin: 0 auto; max-width: 900px; background: #1c1c1c; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <label>Model <select id="model"><option value="multiplus2">MultiPlus-II</option><option value="quattro">Quattro</option><option value="multi_rs">Multi RS</option></select></label>
+    <label>Phases <select id="phases"><option value="3">Three phase</option><option value="2">Split phase</option><option value="1">Single</option><option value="p2">2 in parallel</option></select></label>
+    <label>Chargers <select id="mppts"><option value="0">0</option><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option></select></label>
+    <label>Charger size <select id="msize"><option value="mppt_small">Small</option><option value="mppt_large">Large</option></select></label>
+    <label>Size <select id="size"><option value="compact">Compact</option><option value="large">Large</option></select></label>
+    <label>Situation <select id="sit"><option value="inv">Inverting, no grid</option><option value="chg">Grid, charging (numeric states)</option><option value="alarm">L2 overload + MPPT alarm</option><option value="min">Only power entities set</option></select></label>
+    <label>Totals <select id="tot"><option value="1">Set</option><option value="0">None</option></select></label>
+    <label>Width <select id="w"><option value="900">900 px</option><option value="600">600 px</option><option value="360">360 px</option></select></label>
+  </div>
+  <div class="stage"><div class="frame" id="frame"></div></div>
+  <script src="../inverter-stack-card.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let card;
+    function build() {
+      const sit = $("sit").value, ph = $("phases").value, n = +$("mppts").value;
+      const phases = ph === "3" ? ["L1", "L2", "L3"] : ph === "2" ? ["L1", "L2"] : ph === "p2" ? ["L1", "L1"] : [""];
+      const states = {};
+      const set = (id, v, u) => (states[id] = { state: String(v), attributes: u ? { unit_of_measurement: u } : {} });
+      const out = [1420, 1185, 1630];
+      const inverters = phases.map((p, i) => {
+        const k = `inv${i + 1}`;
+        const over = sit === "alarm" && i === 1;
+        set(`sensor.${k}_power`, over ? 5480 : out[i], "W");
+        set(`sensor.${k}_state`, sit === "chg" ? 3 : over ? "Overload" : "Inverting");    // 3 = Bulk (VE.Bus number)
+        set(`sensor.${k}_ac_in`, sit === "chg" ? (out[i] + 640) / 1000 : 0, "kW");         // kW on purpose
+        set(`sensor.${k}_dc_current`, sit === "chg" ? 13.2 : -out[i] / 51, "A");
+        set(`sensor.${k}_voltage`, 230 + i, "V"); set(`sensor.${k}_freq`, 50, "Hz");
+        set(`binary_sensor.${k}_alarm`, over ? "on" : "off");
+        const d = { model: $("model").value, phase: p || undefined, power: `sensor.${k}_power` };
+        if (sit !== "min") Object.assign(d, { state: `sensor.${k}_state`, ac_in_power: `sensor.${k}_ac_in`, dc_current: `sensor.${k}_dc_current`, voltage: `sensor.${k}_voltage`, frequency: `sensor.${k}_freq`, alarm: `binary_sensor.${k}_alarm` });
+        if (ph === "p2") d.name = `Unit ${i + 1}`;
+        return d;
+      });
+      const pvs = [1420, 1310, 980];
+      const chargers = Array.from({ length: n }, (_, i) => {
+        const k = `mppt${i + 1}`;
+        set(`sensor.${k}_power`, pvs[i], "W");
+        set(`sensor.${k}_state`, sit === "alarm" && i === 0 ? 2 : i === 2 ? 5 : 3);          // 2 = Fault, 3 = Bulk, 5 = Float
+        set(`sensor.${k}_yield`, [4400, 4100, 3000][i], "Wh");                               // Wh on purpose
+        const d = { model: $("msize").value, label: $("msize").value === "mppt_large" ? "250/100" : "150/35", power: `sensor.${k}_power` };
+        if (sit !== "min") Object.assign(d, { state: `sensor.${k}_state`, yield_today: `sensor.${k}_yield` });
+        return d;
+      });
+      const loads = out.slice(0, phases.length).reduce((a, b) => a + b, 0);
+      set("sensor.ac_loads", loads, "W"); set("sensor.grid", sit === "chg" ? 6155 : 0, "W");
+      set("sensor.solar", pvs.slice(0, n).reduce((a, b) => a + b, 0), "W"); set("sensor.battery", sit === "chg" ? 2400 : -1505, "W");
+      const config = { type: "custom:inverter-stack-card", name: "Victron", size: $("size").value, inverters, chargers };
+      if ($("tot").value === "1") Object.assign(config, { entity_loads: "sensor.ac_loads", entity_grid: "sensor.grid", entity_solar: "sensor.solar", entity_battery: "sensor.battery" });
+      window.__config = config;
+      return { config, hass: { states } };
+    }
+    function render() {
+      $("frame").style.maxWidth = `${$("w").value}px`;
+      const { config, hass } = build();
+      if (!card) { card = document.createElement("inverter-stack-card"); $("frame").appendChild(card); }
+      card.setConfig(config);
+      card.hass = hass;
+    }
+    document.querySelectorAll(".controls select").forEach((el) => el.addEventListener("input", render));
+    customElements.whenDefined("inverter-stack-card").then(render);
+  </script>
+</body>
+</html>
